@@ -1,0 +1,193 @@
+---
+title: "Fitbit"
+author: "Team39"
+date: '2022-10-10'
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r}
+library(dplyr)
+library(ggplot2)
+library(corrplot)
+library(car)
+library(lmtest)
+
+
+FitbitAct <- read.csv(file.choose()) 
+FitbitSleep <- read.csv(file.choose()) 
+FitbitSleep$SleepDay <- strptime(FitbitSleep$SleepDay, format = "%m/%d/%Y %I:%M:%S %p") #convert date/time format
+FitbitAct$ActivityDate <- strptime(FitbitAct$ActivityDate, format = "%m/%d/%Y")
+
+Fitbit <- FitbitAct %>%
+      inner_join(FitbitSleep, by = c("Id", "ActivityDate" = "SleepDay"))
+#Use Fitbit date frame for further analysis
+
+Fitbit <- Fitbit %>%
+      mutate(TimeInBedNotSleeping = TotalTimeInBed - TotalMinutesAsleep)
+```
+
+#EDA
+```{r}
+length(unique(Fitbit$Id))
+#The problem here is that we only have 24 unique users who have both the activity record and sleep record
+
+ggplot(Fitbit, aes(x = Calories, y = TotalMinutesAsleep)) +
+      geom_point() +
+      facet_wrap(~Id)
+
+ggplot(Fitbit, aes(x = Calories, y = TimeInBedNotSleeping)) +
+      geom_point() +
+      facet_wrap(~Id)
+
+ggplot(Fitbit, aes(x = Calories)) +
+      geom_density() +
+      facet_wrap(~Id)
+
+#correlations between numerical variables
+numV <- which(sapply(Fitbit, is.numeric)) #saving the indices of numeric columns
+corNumV <- cor(Fitbit[,numV],use="pairwise.complete.obs")
+corNumV_sort <- as.matrix(sort(corNumV[,'TotalMinutesAsleep'],decreasing = TRUE)) #sort based on the correlation of variable with SalePrice
+CorNumV_high <- names(which(apply(corNumV_sort, 1, function(x) abs(x)>0.1))) #the apply function cannot be applied to a vector, so transform corNum_sort to matrix is necessary
+corNumV1 <- corNumV[CorNumV_high,CorNumV_high]
+corrplot.mixed(corNumV1, tl.col="black", tl.pos = "lt", number.cex = 0.7)
+
+
+medianCal <- median(Fitbit$Calories)
+ggplot(Fitbit, aes(x = Calories)) +
+      geom_density() +
+      geom_vline(xintercept = medianCal, size = 1, color = "red") +
+      geom_text(aes(x = medianCal + 500, label = paste0("median\n", medianCal), y = 5e-04))
+
+ggplot(Fitbit, aes(x = SedentaryMinutes, y = TotalMinutesAsleep)) +
+      geom_point() +
+      stat_smooth(method = "lm",formula = y ~ x, geom = "smooth")
+```
+
+#Simple Linear model
+            Treatment: SedentaryMinutes
+            Control: Everthing else
+            Target: TotalMinutesAsleep
+#VIF：      Test multicollinearity
+#Heteroblabla: plot residuals (bptest)
+#OVB:
+            Potential IV: 
+            1)temperature of the room(gender); 
+            2)price of the chair(age)
+#DiD:
+
+```{r}
+meantime <- Fitbit %>%
+      group_by(Id) %>%
+      summarize(meanSit = mean(SedentaryMinutes))
+
+Fitbit2 <- Fitbit
+for(i in 1:nrow(Fitbit)){
+      for(k in 1: nrow(meantime)){
+      if(Fitbit2$Id[i] == meantime$Id[k]){
+            if(Fitbit2[i,"SedentaryMinutes"] < meantime[k,"meanSit"]){
+                  Fitbit2[i,"SedentaryTreat"] = 1
+            }
+            else{
+                  Fitbit2[i,"SedentaryTreat"] = 0
+            }
+      }
+      }
+}
+```
+
+```{r}
+Fitbit %>%
+      select(Id, ActivityDate, SedentaryMinutes, TotalMinutesAsleep, SedentaryTreat) %>% 
+      arrange(ActivityDate)
+```
+
+
+```{r}
+# Data cleaning: delete records where total sleep hours and activity hours > 24hours
+Fitbit[c(which((Fitbit$SedentaryMinutes + Fitbit$TotalMinutesAsleep) > 24*60)),]
+
+ggplot(Fitbit, aes(x = TotalMinutesAsleep)) +
+      geom_histogram()
+```
+
+```{r}
+# Drop rows
+weirdrows <- which((Fitbit$SedentaryMinutes + Fitbit$TotalMinutesAsleep) > 24*60)
+Fitbit <- Fitbit[-weirdrows,]
+
+```
+#Simple Linear model
+            Treatment: SedentaryMinutes
+            Control: Everthing else
+            Target: TotalMinutesAsleep
+            
+```{r}
+# Simple Linear Model
+
+# Adding sedentary treatment column 
+Sedentary_Treatment <- ifelse(Fitbit$SedentaryMinutes >= mean(Fitbit$SedentaryMinutes), 1, 0)
+Fitbit$Sedentary_Treatment <- Sedentary_Treatment
+
+# TotalMinutesAsleep ~ everything - SedentaryMinutes
+simplemodel <- lm(TotalMinutesAsleep ~ . - SedentaryMinutes -Id - ActivityDate - TotalTimeInBed, data=Fitbit)
+summary(simplemodel)
+```
+
+
+
+```{r}
+# Testing for multicollinearity (VIF) - drop variables with VIF > 10
+
+vif_model <- vif(simplemodel)
+name_drop <- which(vif_model > 10) 
+# TotalSteps, TotalDistance, TrackerDistance, VeryActiveDistance, ModeratelyActiveDistance, LightActiveDistance, VeryActiveMinutes, FairlyActiveMinutes
+    
+
+# Drop multicollinear variables
+Fitbit1 <- Fitbit %>%
+  select(-name_drop)
+
+# New simple linear model after dropping multicollinear variable 
+simplemodel_new <- lm(TotalMinutesAsleep ~ . - SedentaryMinutes - ActivityDate, data=Fitbit)
+
+# BP test for Hetero
+bptest(simplemodel_new)
+res = residuals(simplemodel_new)
+plot(Fitbit1$Sedentary_Treatment, res)
+plot(Fitbit1$SedentaryMinutes, res)
+# Since p-value = 0.4202, we fail to reject the null > not hetero
+```
+
+```{r}
+# Irrelevant Regressors
+simplemodel1 <- lm(log(TotalMinutesAsleep) ~ . + (Sedentary_Treatment*SedentaryMinutes), data=Fitbit1)
+summary(simplemodel1)
+
+simplemodel2 <- lm(log(TotalMinutesAsleep) ~ (SedentaryMinutes*Sedentary_Treatment) + TotalDistance + FairlyActiveMinutes + Calories + TotalSleepRecords + TotalTimeInBed, data=Fitbit1)
+summary(simplemodel2)
+vif(simplemodel2)
+
+# BP test for Hetero
+bptest(simplemodel2)
+res = residuals(simplemodel2)
+plot(Fitbit1$Sedentary_Treatment, res)
+plot(Fitbit1$SedentaryMinutes, res)
+#p-value is almost 0. We reject the null > hetero exists. 
+
+library(sandwich)
+# Adjust for Robust Std Errors
+coeftest(simplemodel2)             # Coefficient estimates without adjustment
+coeftest(simplemodel2,vcov=vcovHC) # Coefficient estimates with adjustment
+# vcovHC = Heteroscedasticity-Consistent Covariance Matrix Estimation
+# Intepretation: 
+# Parameter estimates don't change. Only the Std Error. In this case, the impact is negligible.
+
+# TotalDistance, ModeratelyActiveDistance, VeryActiveMinutes, FairlyActiveMinutes, LightlyActiveMinutes, SedentaryMinutes, Calories, TotalSleepRecords, TotalTimeInBed, TimeInBedNotSleeping, Sedentary_Treatment
+
+#Variables that lead to Decrease in Adjusted R-Squared: (1)VeryActiveMinutes, (2) LightlyActiveMinutes, (3) TimeInBedNotSleeping
+# FairlyActiveMinutes R^2 increased by 0.008
+```

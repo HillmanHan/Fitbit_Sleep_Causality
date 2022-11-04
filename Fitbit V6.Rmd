@@ -1,0 +1,191 @@
+---
+title: "Fitbit"
+author: "Team39"
+date: '2022-10-10'
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r}
+#Loading packages
+library(dplyr)
+library(ggplot2)
+library(corrplot)
+library(car)
+library(lmtest)
+library(foreign)
+library(gplots)
+library(lmtest)
+library(psych)
+library(plm)
+
+
+FitbitAct <- read.csv(file.choose()) #use dailyActivity_merged.csv
+FitbitSleep <- read.csv(file.choose()) #use sleepDay_merged.csv
+FitbitSleep$SleepDay <- strptime(FitbitSleep$SleepDay, format = "%m/%d/%Y %I:%M:%S %p") #convert date/time format
+FitbitAct$ActivityDate <- strptime(FitbitAct$ActivityDate, format = "%m/%d/%Y") #same as above
+
+Fitbit <- FitbitAct %>%
+      inner_join(FitbitSleep, by = c("Id", "ActivityDate" = "SleepDay"))
+#We use the combined Fitbit data frame for further analysis
+
+```
+
+#EDA
+```{r}
+length(unique(Fitbit$Id))
+#Since we used inner_join to get the Fitbit data frame, the line shows that we only have 24 unique users who have both the activity record and sleep record
+
+ggplot(Fitbit, aes(x = SedentaryMinutes, y = TotalMinutesAsleep)) +
+      geom_point() +
+      facet_wrap(~Id)
+#scatter plot of sedentary minutes against total minutes asleep for each user
+
+ggplot(Fitbit, aes(x = SedentaryMinutes)) +
+      geom_density() +
+      facet_wrap(~Id)
+#density plot of sendetary minutes for each user
+
+#correlations between numerical variables
+numV <- which(sapply(Fitbit, is.numeric)) #saving the indices of numeric columns
+corNumV <- cor(Fitbit[,numV],use="pairwise.complete.obs")
+corNumV_sort <- as.matrix(sort(corNumV[,'TotalMinutesAsleep'],decreasing = TRUE)) #sort based on the correlation of variable with SalePrice
+CorNumV_high <- names(which(apply(corNumV_sort, 1, function(x) abs(x)>0.1))) #the apply function cannot be applied to a vector, so transform corNum_sort to matrix is necessary
+corNumV1 <- corNumV[CorNumV_high,CorNumV_high]
+corrplot.mixed(corNumV1, tl.col="black", tl.pos = "lt", number.cex = 0.7) #plot
+
+
+medianSit <- median(Fitbit$SedentaryMinutes) #store median
+ggplot(Fitbit, aes(x = SedentaryMinutes)) +
+      geom_density() +
+      geom_vline(xintercept = medianSit, size = 1, color = "red") +
+      geom_text(aes(x = medianSit + 100, label = paste0("median\n", medianSit), y = 5e-04)) 
+#density plot across all inputs with median
+
+ggplot(Fitbit, aes(x = SedentaryMinutes, y = TotalMinutesAsleep)) +
+      geom_point() +
+      stat_smooth(method = "lm",formula = y ~ x, geom = "smooth")
+#scatter plot of sedentary minutes against total minutes asleep for all inputs
+
+ggplot(Fitbit, aes(x = TotalMinutesAsleep)) +
+      geom_histogram()
+#plot histogram of total minutes asleep
+```
+
+Data cleaning
+```{r}
+# Data cleaning: delete records where total sleep hours and activity hours > 24hours
+Fitbit[c(which((Fitbit$SedentaryMinutes + Fitbit$TotalMinutesAsleep) > 24*60)),]
+
+# Drop rows
+weirdrows <- which((Fitbit$SedentaryMinutes + Fitbit$TotalMinutesAsleep) > 24*60)
+Fitbit <- Fitbit[-weirdrows,]
+
+
+```
+
+
+We thought about using the average sedentary minutes as the threshold to make treatment dummy, but later we decided to use the average sedentary minutes of U.S. citizens as our threshold.
+```{r}
+# New Fitbit Dataset with Treatment assigned based on ID's average 
+meantime <- Fitbit %>%
+      group_by(Id) %>%
+      summarize(meanSit = mean(SedentaryMinutes))
+Fitbit2 <- Fitbit
+for(i in 1:nrow(Fitbit)){
+      for(k in 1: nrow(meantime)){
+      if(Fitbit2$Id[i] == meantime$Id[k]){
+            if(Fitbit2[i,"SedentaryMinutes"] < meantime[k,"meanSit"]){
+                  Fitbit2[i,"SedentaryTreat"] = 1
+            }
+            else{
+                  Fitbit2[i,"SedentaryTreat"] = 0
+            }
+      }
+      }
+}
+
+# Adding sedentary treatment column 
+Sedentary_Treatment <- ifelse(Fitbit$SedentaryMinutes >= 390, 1, 0)
+#390 minutes is the sedentary minutes of US citizen, quoted from Washington Post
+Fitbit$Sedentary_Treatment <- Sedentary_Treatment 
+```
+
+
+#Simple Linear model
+            Treatment: SedentaryMinutes
+            Control: Everthing else
+            Target: TotalMinutesAsleep
+```{r}
+# Simple Linear Model
+model1<- lm(TotalMinutesAsleep ~. -Id - ActivityDate, data = Fitbit)
+summary(model1)
+plot(model1)
+
+# Next model to try - deleted insignificant variables one by one 
+simplemodel2 <- lm(TotalMinutesAsleep ~ . -Id - ActivityDate - TotalTimeInBed - TotalSleepRecords - TotalSteps - LightlyActiveMinutes - ModeratelyActiveDistance - LightActiveDistance  - LoggedActivitiesDistance - TotalDistance - SedentaryActiveDistance - FairlyActiveMinutes, data=Fitbit)
+summary(simplemodel2)
+# Left out total distance. Tracker distance is more accurate 
+which(Fitbit$TotalDistance != Fitbit$TrackerDistance)
+Fitbit[which(Fitbit$TotalDistance != Fitbit$TrackerDistance),]
+
+
+# Simple model with dummy treatment (by average U.S. citizen)
+simplemodel4 <- lm(TotalMinutesAsleep ~ . -Id - ActivityDate - TotalTimeInBed - TotalSleepRecords - TotalSteps - LightlyActiveMinutes - ModeratelyActiveDistance - LightActiveDistance - LoggedActivitiesDistance - TotalDistance - SedentaryActiveDistance + SedentaryMinutes*Sedentary_Treatment - FairlyActiveMinutes, data=Fitbit)
+summary(simplemodel4)
+```
+
+
+Testing the linear model
+```{r}
+# Testing for multicollinearity (VIF) - drop variables with VIF > 10
+vif_model <- vif(simplemodel4)
+vif_model
+#since only the sedentary minutes and the interaction have high vif, as these are the regressors of our interest, we decide not to drop any variable for multicollinearity.
+
+
+# BP test for Hetero
+# H0: homoscedasticity (= variance does not depend on auxiliary regressors). 
+bptest(simplemodel4)
+res <- residuals(simplemodel4)
+plot(Fitbit$Sedentary_Treatment, res)
+plot(Fitbit$SedentaryMinutes, res)
+#Reject Null as p-value < 0.05. Heteroscedasticity is present
+```
+
+```{r}
+# Advanced techniques 
+# Panel Regression
+ols <-lm(TotalMinutesAsleep ~ SedentaryMinutes, data=Fitbit2)
+summary(ols)
+
+fixed.dum <-lm(TotalMinutesAsleep ~ SedentaryMinutes + factor(Id) - 1, data=Fitbit2)
+summary(fixed.dum)
+
+###
+fixed.IdFE<-plm(TotalMinutesAsleep~SedentaryMinutes,data=Fitbit2,index=c("Id","ActivityDate"),model="within")
+summary(fixed.IdFE)
+
+# Unbalanced Panel due to some individuals not having data for all the days (maybe not wearing Fitbit)
+# Pr(>|t|)= Two-tail p-values test the hypothesis that each coefficient
+# is different from 0. Since our p-value < 0.05, we can reject the null. 
+# Hence, we can say that SedentaryMinutes has a significant influence on TotalMinutesAsleep.
+# The coeff SedentaryMinutes of indicates how much TotalMinutesAsleep changes overtime, on average per individual (id), when SedentaryMinutes increases by one unit.
+
+## Testing for fixed effects, null: OLS better than fixed 
+pFtest(fixed.IdFE, ols)
+# Since p-value < 0.05, we reject the null hypothesis -- fixed effects is better than OLS
+ 
+summary(fixef(fixed.IdFE))
+```
+
+Graph for panel data
+```{r}
+yhat <- fixed.dum$fitted
+scatterplot(yhat~Fitbit2$SedentaryMinutes|Fitbit2$Id, boxplots=FALSE, xlab="x1", ylab="yhat",smooth=FALSE) +
+abline(lm(Fitbit2$TotalMinutesAsleep~Fitbit2$SedentaryMinutes),lwd=3, col="red")
+```
+```
