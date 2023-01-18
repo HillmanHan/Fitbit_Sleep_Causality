@@ -1,5 +1,5 @@
 # Fitbit_Sleep_Causality
-Introduction 
+## Introduction 
 The aim of our project is to examine if there is a causal relationship between the number of sedentary minutes for an individual recorded and their sleep quality. In our case, total sleep time in bed is used as a proxy for sleep quality. In order to determine if there exists a causal effect, we used methods varying from a simple linear model regression to a panel regression to do so. 
 
 Files included:
